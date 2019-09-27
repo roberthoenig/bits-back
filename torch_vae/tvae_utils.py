@@ -2,7 +2,6 @@ import numpy as np
 import torch
 
 import util
-from torch_vae.tvae_beta_binomial import beta_binomial_log_pdf
 
 
 def tensor_to_ndarray(tensor):
