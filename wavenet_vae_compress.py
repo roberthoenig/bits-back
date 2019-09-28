@@ -67,8 +67,10 @@ print(f'The encoder has {parameter_count(model.encoder)} parameters')
 print(f'The decoder has {parameter_count(model.decoder)} parameters')
 
 gumbel_softmax_temperature = 1.
-INPUT_LENGTH = 100
-x = dataset[123].long().unsqueeze(0)[:, 0:INPUT_LENGTH]
+x = dataset[123].long().unsqueeze(0)
+print("x.size(-1)", x.size(-1))
+INPUT_LENGTH = x.size(-1)
+x = x[:, 0:INPUT_LENGTH]
 latent_shape = x.shape
 
 p_x, q_z = model(x, gumbel_softmax_temperature)
@@ -89,7 +91,7 @@ def cvae_append(latent_shape, rec_net, prior_prec=8,
     def post_pop(data):
         # print("post_pop data", data)
         posterior_probs = rec_net(data.unsqueeze(0))
-        print("post_pop posterior_probs", posterior_probs)
+        # print("post_pop posterior_probs", posterior_probs)
         return util.categoricals_pop(posterior_probs, latent_prec)
     def lik_append(latents):
         '''
@@ -99,11 +101,11 @@ def cvae_append(latent_shape, rec_net, prior_prec=8,
             '''
             data: (T,) tensor
             '''
-            print("data", data.shape,)
-            print("latents", latents, latents.shape)
+            # print("data", data.shape,)
+            # print("latents", latents, latents.shape)
             one_hot_x = one_hot(data.unsqueeze(0), model.decoder.wavenet.out_channels)
             one_hot_c = one_hot(torch.tensor(latents).unsqueeze(0), model.decoder.wavenet.cin_channels)
-            logits = model.decoder.wavenet.incremental_forward(all_x=one_hot_x, c=None) # c=one_hot_c
+            logits = model.decoder.wavenet.incremental_forward(all_x=one_hot_x, c=one_hot_c)
             probs = F.softmax(logits, dim=1).squeeze().numpy().transpose()
             state = util.categoricals_append(probs, obs_precision)(state, data.numpy())
             return state
@@ -123,17 +125,17 @@ def cvae_pop(
         returns: function(state) that returns (state, data)
         '''
         def lik_pop_(state):
-            print("type(state)", type(state))
-            print("latents", latents, latents.shape)
+            # print("type(state)", type(state))
+            # print("latents", latents, latents.shape)
             one_hot_c = one_hot(torch.tensor(latents).unsqueeze(0), model.decoder.wavenet.cin_channels)
-            state, data = model.decoder.wavenet.incremental_forward_recover(state, length=INPUT_LENGTH, precision=obs_precision, categoricals_pop=util.categoricals_pop, c=None) # c=one_hot_c
+            state, data = model.decoder.wavenet.incremental_forward_recover(state, length=INPUT_LENGTH, precision=obs_precision, categoricals_pop=util.categoricals_pop, c=one_hot_c)
             return state, data
         return lik_pop_
     def post_append(data):
-        print("post_append data", data)
-        print("data.dtype", data.dtype)
+        # print("post_append data", data)
+        # print("data.dtype", data.dtype)
         posterior_probs = rec_net(np.expand_dims(data, 0))
-        print("post_append posterior_probs", posterior_probs)
+        # print("post_append posterior_probs", posterior_probs)
         return util.categoricals_append(posterior_probs, latent_prec)
     return util.bb_ans_pop(prior_pop, lik_pop, post_append)
 
@@ -153,11 +155,17 @@ state = rans.x_init
 state = util.uniforms_append(32)(state, other_bits)
 # ---------------------------- ENCODE ------------------------------------
 x = x.squeeze()
-print("x:", x, x.size())
+# print("x:", x, x.size())
 state = vae_append(state, x)
 compressed_message = rans.flatten(state)
 print("Used " + str(32 * (len(compressed_message) - len(other_bits))) +
       " bits.")
+message_length = x.size(-1)
+compressed_message_length = (len(compressed_message) - len(other_bits))*4
+compression_ratio = message_length / compressed_message_length
+compressed_bits_per_dimension = 8 / compression_ratio
+print("compression ratio:", compression_ratio)
+print("compression bits per dimension:", compressed_bits_per_dimension)
 # ---------------------------- DECODE ------------------------------------
 state = rans.unflatten(compressed_message)
 state, x_ = vae_pop(state)
@@ -167,7 +175,5 @@ print("First entries in x_: ", x_)
 
 #  recover the other bits from q(y|x_0)
 state, recovered_bits = util.uniforms_pop(32, other_bits.shape[0])(state)
-print("other_bits", other_bits)
-print("recovered_bits", recovered_bits)
 assert all(other_bits == recovered_bits)
 assert state == rans.x_init
