@@ -32,7 +32,7 @@ rng = np.random.RandomState(0)
 prior_precision = 8
 obs_precision = 14
 compress_lengths = []
-snapshot_name = "49"
+snapshot_name = "51"
 
 with open(f"{prfx}/configs/{snapshot_name}.json") as f:
     data = f.read()
@@ -46,20 +46,25 @@ snapshot_interval = train_args["snapshot_interval"]
 ar_factor = train_args.get("ar_factor", None)
 hard_gumbel_softmax = train_args.get("hard_gumbel_softmax", False)
 gumbel_softmax_temperature = train_args["gumbel_softmax_temperature"]
+data_length = config.get("data_length", None)
+model_type = config.get("type", None)
 
 model = VAE(
     OneHotConvolutionalEncoder(encoder_wavenet_args),
     BetterWaveNetDecoder(decoder_wavenet_args),
     hard_gumbel_softmax=hard_gumbel_softmax,
 ) 
-checkpoint_dict = torch.load(f"{prfx}/snapshots/{snapshot_name}/{snapshot_name}_28000", map_location='cpu')
+checkpoint_dict = torch.load(f"{prfx}/snapshots/{snapshot_name}/{snapshot_name}_120000", map_location='cpu')
 model = nn.DataParallel(model)
 model.load_state_dict(checkpoint_dict['model'])
 model = model.module
 model = model.to('cpu')
 model.eval()
 
-dataset = AudioDataset(prfx+"wav_audio/small_wav_tensor.pt", model.decoder.wavenet.receptive_field*4)        
+if data_length is None:
+    receptive_field_closest_power_of_3 = int(3**math.ceil(math.log(model.decoder.wavenet.receptive_field, 3)))
+    data_length = receptive_field_closest_power_of_3 * 3
+dataset = AudioDataset(prfx+"wav_audio/small_wav_tensor.pt", data_length)        
 print('the dataset has ' + str(len(dataset)) + ' items')
 print(f'each item has length {dataset.len_sample}')
 print(f'The WaveNetVAE has {parameter_count(model.encoder) + parameter_count(model.decoder)} parameters')
@@ -67,11 +72,18 @@ print(f'The encoder has {parameter_count(model.encoder)} parameters')
 print(f'The decoder has {parameter_count(model.decoder)} parameters')
 
 gumbel_softmax_temperature = 1.
-x = dataset[123].long().unsqueeze(0)
-print("x.size(-1)", x.size(-1))
-INPUT_LENGTH = x.size(-1)
+x = dataset[50].long().unsqueeze(0)
+# print("x.size(-1)", x.size(-1))
+INPUT_LENGTH = 3**6
+# INPUT_LENGTH = x.size(-1)
 x = x[:, 0:INPUT_LENGTH]
-latent_shape = x.shape
+# print("x", x)
+# Adapt as appropriate for the model
+if model_type == "betterwavenet":
+    latent_shape = (x.size(0), x.size(1)//(3**4))
+else:
+    raise Exception(f"no latent shape specified for model type {model_type}")
+# print("latent_shape", latent_shape)
 
 p_x, q_z = model(x, gumbel_softmax_temperature)
 d = model.loss(p_x, x, q_z, 0., ar_factor)
@@ -89,9 +101,10 @@ def cvae_append(latent_shape, rec_net, prior_prec=8,
     with uniform prior
     """
     def post_pop(data):
-        # print("post_pop data", data)
+        # print("post_pop data.shape", data.shape)
+        torch.manual_seed(0)
         posterior_probs = rec_net(data.unsqueeze(0))
-        # print("post_pop posterior_probs", posterior_probs)
+        # print("post_pop posterior_probs.shape", posterior_probs.shape)
         return util.categoricals_pop(posterior_probs, latent_prec)
     def lik_append(latents):
         '''
@@ -101,12 +114,18 @@ def cvae_append(latent_shape, rec_net, prior_prec=8,
             '''
             data: (T,) tensor
             '''
-            # print("data", data.shape,)
-            # print("latents", latents, latents.shape)
+            # print("lik_append_ data.shape", data.shape,)
+            print("lik_append_ latents", latents, latents.shape)
             one_hot_x = one_hot(data.unsqueeze(0), model.decoder.wavenet.out_channels)
             one_hot_c = one_hot(torch.tensor(latents).unsqueeze(0), model.decoder.wavenet.cin_channels)
-            logits = model.decoder.wavenet.incremental_forward(all_x=one_hot_x, c=one_hot_c)
-            probs = F.softmax(logits, dim=1).squeeze().numpy().transpose()
+            torch.manual_seed(0)
+            logits_list = model.decoder.wavenet.incremental_forward(all_x=one_hot_x, c=one_hot_c)
+            print("logits_list[0].shape", logits_list[0].shape)
+            probs_list = [F.softmax(outputs[-1], dim=-1).numpy() for outputs in logits_list]
+            probs = np.stack(probs_list)
+            print("probs.shape", probs.shape)
+            # probs = F.softmax(logits, dim=1).squeeze().numpy().transpose()
+            torch.save(probs, "lik_append_probs_2.pt")
             state = util.categoricals_append(probs, obs_precision)(state, data.numpy())
             return state
         return lik_append_
@@ -126,14 +145,16 @@ def cvae_pop(
         '''
         def lik_pop_(state):
             # print("type(state)", type(state))
-            # print("latents", latents, latents.shape)
+            print("lik_pop_ latents", latents, latents.shape)
             one_hot_c = one_hot(torch.tensor(latents).unsqueeze(0), model.decoder.wavenet.cin_channels)
-            state, data = model.decoder.wavenet.incremental_forward_recover(state, length=INPUT_LENGTH, precision=obs_precision, categoricals_pop=util.categoricals_pop, c=one_hot_c)
+            torch.manual_seed(0)
+            state, data, all_probs = model.decoder.wavenet.incremental_forward_recover(state, length=INPUT_LENGTH, precision=obs_precision, categoricals_pop=util.categoricals_pop, c=one_hot_c)
             return state, data
         return lik_pop_
     def post_append(data):
         # print("post_append data", data)
         # print("data.dtype", data.dtype)
+        torch.manual_seed(0)
         posterior_probs = rec_net(np.expand_dims(data, 0))
         # print("post_append posterior_probs", posterior_probs)
         return util.categoricals_append(posterior_probs, latent_prec)
@@ -170,8 +191,8 @@ print("compression bits per dimension:", compressed_bits_per_dimension)
 state = rans.unflatten(compressed_message)
 state, x_ = vae_pop(state)
 # assert all(x == x_)
-print("First entries in x: ", x)
-print("First entries in x_: ", x_)
+print("First entries in x: ", x[:10])
+print("First entries in x_: ", x_[:10])
 
 #  recover the other bits from q(y|x_0)
 state, recovered_bits = util.uniforms_pop(32, other_bits.shape[0])(state)
