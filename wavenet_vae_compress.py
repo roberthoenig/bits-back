@@ -12,7 +12,7 @@ import rans
 from torch_vae import tvae_utils
 import time
 import json
-from audio_data import AudioDataset
+from dataset import AudioDataset
 from vae import VAE, OneHotConvolutionalEncoder, BetterWaveNetDecoder
 import torch
 import torch.nn as nn
